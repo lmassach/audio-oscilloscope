@@ -50,12 +50,12 @@ class Oscilloscope:
             raise ValueError("The plot refresh interval must be > 0")
         self._rate = (  # In Hz
             float(sampling_rate) if sampling_rate is not None else
-            sd.query_devices(self._device_name, 'input')[0]['default_samplerate'])
+            sd.query_devices(self._device_name, 'input')['default_samplerate'])
         self._downsample = int(downsample)
         if not self._downsample > 0:
             raise ValueError("The downsample must be >= 1")
-        self._level = float(trigger_level)
-        if not -1 < self._level < 1:
+        self._level = None if trigger_level is None else float(trigger_level)
+        if self._level is not None and not -1 < self._level < 1:
             raise ValueError("Trigger level must be in (-1, 1)")
         self._edge = bool(trigger_edge_falling)
         self._debug = bool(print_debug_info)
@@ -86,7 +86,7 @@ class Oscilloscope:
     def _data_proc(self):
         count, start, report = 0, datetime.datetime.now(), Reporter()
         buf = np.zeros(self._window_len * 2)
-        trg_idx = -1  # Position of the last trigger in the buffer
+        trg_idx = 0  # Position of the last trigger in the buffer
         while True:
             if self._stop:
                 break
@@ -96,8 +96,8 @@ class Oscilloscope:
             except queue.Empty:
                 continue  # Allows to check if self._stop was set every 50 ms
             l = len(new_data)  # l is always <= self._window_len (see blocksize)
+            count += l
             if self._debug:
-                count += l
                 rate = count / (datetime.datetime.now() - start).total_seconds()
                 report(f"{count} samples ({rate:.0f} Hz)", end='\r')
             # Put new data in the buffer
@@ -105,20 +105,28 @@ class Oscilloscope:
             buf[-l:] = new_data
             trg_idx -= l
             # Look for triggers
-            if self._edge:  # Falling edge
-                t = (buf[:-1] >= self._level) & (buf[1:] < self._level)
-            else:  # Rising edge
-                t = (buf[:-1] <= self._level) & (buf[1:] > self._level)
-            # Only consider triggers that have self._window_len//2 samples to
-            # their left and right, and have not been already processed
-            first = max(self._window_len // 2, trg_idx + 1)
-            last = 3 * self._window_len // 2
-            for i in np.argwhere(t[first:last]) + first:
-                trg_idx = int(i)  # Avoid having 0D arrays
-                self._trg_count += 1
-                self._q_trg.put(TriggeredData(
-                    self._trg_count, (count - len(buf) + trg_idx) / self._rate,
-                    buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2]))
+            if self._level is None:  # Auto mode: trigger every self._window_len samples
+                while trg_idx < self._window_len:
+                    self._trg_count += 1
+                    self._q_trg.put(TriggeredData(
+                        self._trg_count, (count - len(buf) + trg_idx) / self._rate,
+                        buf[trg_idx:trg_idx+self._window_len]))
+                    trg_idx += self._window_len
+            else:
+                if self._edge:  # Falling edge
+                    t = (buf[:-1] >= self._level) & (buf[1:] < self._level)
+                else:  # Rising edge
+                    t = (buf[:-1] <= self._level) & (buf[1:] > self._level)
+                # Only consider triggers that have self._window_len//2 samples to
+                # their left and right, and have not been already processed
+                first = max(self._window_len // 2, trg_idx + 1)
+                last = 3 * self._window_len // 2
+                for i in np.argwhere(t[first:last]) + first:
+                    trg_idx = int(i)  # Avoid having 0D arrays
+                    self._trg_count += 1
+                    self._q_trg.put(TriggeredData(
+                        self._trg_count, (count - len(buf) + trg_idx) / self._rate,
+                        buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2]))
 
     def run(self):
         """Run the oscilloscope. This will activate PyPlot's interactive.
@@ -139,6 +147,9 @@ class Oscilloscope:
             fig = plt.figure()
             self._fig_n = fig.number
             self._plot_h, = plt.plot(self._plot_time, np.zeros_like(self._plot_time))
+            if self._level is not None:
+                plt.axhline(self._level, c='tab:red', ls='--')
+            plt.grid()
             plt.ylim(-1, 1)
             plt.xlabel("Time [ms]")
             plt.ylabel("Amplitude [a.u.]")
