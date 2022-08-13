@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Simple oscilloscope using the microphone input."""
+import argparse
+from collections import namedtuple
+import datetime
+import queue
+import sys
+import threading
+import matplotlib.pyplot as plt
+import numpy as np
+import sounddevice as sd
+
+
+class Reporter:
+    """Behaves like print(), but only writes once every `interval` seconds."""
+    def __init__(self, interval=0.5):
+        interval = float(interval)
+        if not interval > 0:
+            raise ValueError("Interval must be positive")
+        self._interval = datetime.timedelta(seconds=interval)
+        self._last = datetime.datetime.now()
+
+    def __call__(self, *args, **kwargs):
+        now = datetime.datetime.now()
+        if now > self._last + self._interval:
+            self._last = now
+            print(*args, **kwargs)
+
+
+# A class for keeping processed data
+TriggeredData = namedtuple("TriggeredData", "count time data")
+# count: the trigger number
+# time: the trigger time, in seconds since the acquisition began
+# data: a 1D array of samples (half before the trigger, half after)
+
+
+class Oscilloscope:
+    """A simple oscilloscope based on matplotlib and sounddevice."""
+    def __init__(self, device=None, channel=0, window=0.01, interval=0.03,
+                 sampling_rate=None, downsample=1, trigger_level=None,
+                 trigger_edge_falling=True, print_debug_info=False):
+        # Configuration input
+        self._device_name = device
+        self._channel = int(channel)
+        if not self._channel >= 0:
+            raise ValueError("The channel number must be >= 0")
+        self._window = float(window)  # In seconds
+        self._interval = float(interval)  # In seconds
+        if not self._interval > 0:
+            raise ValueError("The plot refresh interval must be > 0")
+        self._rate = (  # In Hz
+            float(sampling_rate) if sampling_rate is not None else
+            sd.query_devices(self._device_name, 'input')[0]['default_samplerate'])
+        self._downsample = int(downsample)
+        if not self._downsample > 0:
+            raise ValueError("The downsample must be >= 1")
+        self._level = float(trigger_level)
+        if not -1 < self._level < 1:
+            raise ValueError("Trigger level must be in (-1, 1)")
+        self._edge = bool(trigger_edge_falling)
+        self._debug = bool(print_debug_info)
+
+        # Computed constants
+        self._window_len = max(256, (int(self._window * self._rate) // 2) * 2)
+        self._plot_time = np.linspace(  # In ms
+            -self._window_len // 2 / self._rate * 1000,
+            self._window_len // 2 / self._rate * 1000,
+            self._window_len)
+
+        # Variables
+        self._q_data = queue.Queue()
+        self._stop = True  # Exit flag
+        self._trg_count = 0  # Trigger count
+        self._q_trg = queue.Queue()
+        self._fig_n = None  # Figure number
+        self._plot_h = None  # Plot handle
+
+    def _audio_cb(self, data, frames, time, status):
+        """Called from a separate thread for each new input data block."""
+        if status:
+            print("Oscilloscope: input device:", status, file=sys.stderr)
+        # In run(), the blocksize parameter of sd.InputStream is used to
+        # force this method to receive <= self._window_len samples each time
+        self._q_data.put(data[::self._downsample, self._channel])
+
+    def _data_proc(self):
+        count, start, report = 0, datetime.datetime.now(), Reporter()
+        buf = np.zeros(self._window_len * 2)
+        trg_idx = -1  # Position of the last trigger in the buffer
+        while True:
+            if self._stop:
+                break
+            # Get new chunk of data
+            try:
+                new_data = self._q_data.get(timeout=0.05)
+            except queue.Empty:
+                continue  # Allows to check if self._stop was set every 50 ms
+            l = len(new_data)  # l is always <= self._window_len (see blocksize)
+            if self._debug:
+                count += l
+                rate = count / (datetime.datetime.now() - start).total_seconds()
+                report(f"{count} samples ({rate:.0f} Hz)", end='\r')
+            # Put new data in the buffer
+            buf[:-l] = buf[l:]
+            buf[-l:] = new_data
+            trg_idx -= l
+            # Look for triggers
+            if self._edge:  # Falling edge
+                t = (buf[:-1] >= self._level) & (buf[1:] < self._level)
+            else:  # Rising edge
+                t = (buf[:-1] <= self._level) & (buf[1:] > self._level)
+            # Only consider triggers that have self._window_len//2 samples to
+            # their left and right, and have not been already processed
+            first = max(self._window_len // 2, trg_idx + 1)
+            last = 3 * self._window_len // 2
+            for i in np.argwhere(t[first:last]) + first:
+                trg_idx = int(i)  # Avoid having 0D arrays
+                self._trg_count += 1
+                self._q_trg.put(TriggeredData(
+                    self._trg_count, (count - len(buf) + trg_idx) / self._rate,
+                    buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2]))
+
+    def run(self):
+        """Run the oscilloscope. This will activate PyPlot's interactive.
+
+        The caller thread will be used to run the plot main loop.
+        Two more threads will be spawned: one to acquire data from the
+        audio device, another to process it; both will be terminated
+        before exiting this function."""
+        # Prepare input processing
+        stream = sd.InputStream(
+            device=self._device_name, channels=self._channel+1,
+            blocksize=min(self._window_len * self._downsample, 4096),
+            samplerate=self._rate, callback=self._audio_cb)
+        proc_th = threading.Thread(target=self._data_proc)
+        # Prepare plotting
+        plt.ion()
+        if not plt.fignum_exists(self._fig_n):
+            fig = plt.figure()
+            self._fig_n = fig.number
+            self._plot_h, = plt.plot(self._plot_time, np.zeros_like(self._plot_time))
+            plt.ylim(-1, 1)
+            plt.xlabel("Time [ms]")
+            plt.ylabel("Amplitude [a.u.]")
+            plt.title("Waiting for trigger")
+        # Run main loop
+        self._stop = False
+        proc_th.start()
+        try:
+            with stream:
+                while proc_th.is_alive() and plt.fignum_exists(self._fig_n):
+                    plt.pause(self._interval)
+                    # Get the latest trigger
+                    data = None
+                    try:
+                        while True:
+                            # TODO Fill an histogram of trigger times or Δt
+                            # TODO Add an option to save trigger data
+                            data = self._q_trg.get_nowait()
+                    except queue.Empty:
+                        pass
+                    if data is None:
+                        continue
+                    # Do the plotting
+                    plt.title(f"Trigger #{data.count} @ +{datetime.timedelta(seconds=data.time)}")
+                    self._plot_h.set_ydata(data.data)
+                    plt.draw()
+        finally:
+            self._stop = True
+            proc_th.join()
+
+
+def int_or_str(x):
+    """Helper for argument parsing."""
+    try:
+        return int(x)
+    except ValueError:
+        return x
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-l", "--list", action="store_true",
+                        help="Show a list of audio devices and exit.")
+    parser.add_argument("-t", "--trigger", type=float,
+                        help="Trigger level (default no trigger / auto mode).")
+    parser.add_argument("-e", "--edge", choices=['r', 'f'], default='f',
+                        help="Trigger edge: falling (default) or rising.")
+    parser.add_argument("-c", "--channel", type=lambda x: int(x) - 1, default=1,
+                        help="Input channel number (default 1, the first).")
+    parser.add_argument('-d', '--device', type=int_or_str,
+                        help='Input device (number or substring), see -l.')
+    parser.add_argument('-w', '--window', type=float, default=10, metavar='WIDTH',
+                        help='Visible time slot in ms (default: %(default)s ms).')
+    parser.add_argument('-i', '--interval', type=float, default=30,
+                        help='Minimum time between plot updates in ms (default: %(default)s ms).')
+    parser.add_argument('-r', '--samplerate', type=float,
+                        help='Sampling rate of audio device in Hz.')
+    parser.add_argument('-n', '--downsample', type=int, default=1, metavar='N',
+                        help='Display every Nth sample (default: %(default)s).')
+    parser.add_argument('--debug', action='store_true', help='Print debug messages.')
+    args = parser.parse_args()
+
+    if args.list:
+        print(sd.query_devices())
+        parser.exit(0)
+
+    Oscilloscope(
+        args.device, args.channel, args.window / 1e3, args.interval / 1e3,
+        args.samplerate, args.downsample, args.trigger, args.edge == 'f',
+        args.debug).run()
