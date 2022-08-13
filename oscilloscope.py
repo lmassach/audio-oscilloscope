@@ -81,7 +81,7 @@ class Oscilloscope:
             print("Oscilloscope: input device:", status, file=sys.stderr)
         # In run(), the blocksize parameter of sd.InputStream is used to
         # force this method to receive <= self._window_len samples each time
-        self._q_data.put(data[::self._downsample, self._channel])
+        self._q_data.put(data[::self._downsample, self._channel].copy())
 
     def _data_proc(self):
         count, start, report = 0, datetime.datetime.now(), Reporter()
@@ -120,13 +120,13 @@ class Oscilloscope:
                     continue
                 # Look for triggers
                 if self._edge:  # Falling edge
-                    t = (buf[:-1] >= self._level) & (buf[1:] < self._level)
+                    t = (buf[first:last-1] >= self._level) & (buf[first+1:last] < self._level)
                 else:  # Rising edge
-                    t = (buf[:-1] <= self._level) & (buf[1:] > self._level)
+                    t = (buf[first:last-1] <= self._level) & (buf[first+1:last] > self._level)
                 # Only consider triggers that have self._window_len//2 samples to
                 # their left and right, and have not been already processed
                 try:
-                    trg_idx = int(np.argwhere(t[first:last])[0]) + first
+                    trg_idx = int(np.argwhere(t)[0]) + first
                 except IndexError:
                     continue  # No trigger
                 self._trg_count += 1
@@ -169,7 +169,9 @@ class Oscilloscope:
                     # Get the latest trigger
                     data = None
                     try:
-                        while True:
+                        # Limiting the number of calls to get_nowait avoids a deadlock
+                        n = self._q_trg.qsize()
+                        for _ in range(n):
                             # TODO Fill an histogram of trigger times or Δt
                             # TODO Add an option to save trigger data
                             data = self._q_trg.get_nowait()
