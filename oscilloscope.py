@@ -186,12 +186,11 @@ class Oscilloscope:
                             data = self._q_trg.get_nowait()
                     except queue.Empty:
                         pass
-                    if data is None:
-                        continue
-                    # Do the plotting
-                    plt.title(f"Trigger #{data.count} ({trg_info}) @ +{datetime.timedelta(seconds=data.time)}")
-                    self._plot_h.set_ydata(data.data)
-                    plt.draw()
+                    if data is not None:
+                        # Do the plotting
+                        plt.title(f"Trigger #{data.count} ({trg_info}) @ +{datetime.timedelta(seconds=data.time)}")
+                        self._plot_h.set_ydata(data.data)
+                        plt.draw()
                     plt.pause(self._interval)
         finally:
             self._stop = True
