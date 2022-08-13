@@ -10,6 +10,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import sounddevice as sd
 
+FALLING_EDGE = '\u21a7'
+RISING_EDGE = '\u21a5'
+
 
 class Reporter:
     """Behaves like print(), but only writes once every `interval` seconds."""
@@ -160,6 +163,12 @@ class Oscilloscope:
             plt.xlabel("Time [ms]")
             plt.ylabel("Amplitude [a.u.]")
             plt.title("Waiting for trigger")
+            dev_info = (f"{sd.query_devices(self._device_name)['name']}"
+                        f" @ {stream.samplerate/1e3:.3g} kHz,"
+                        f" channel {self._channel+1}")
+            trg_info = ("AUTO" if self._level is None else
+                        f"{FALLING_EDGE if self._edge else RISING_EDGE} {self._level}")
+            plt.suptitle(dev_info)
         # Run main loop
         self._stop = False
         proc_th.start()
@@ -180,7 +189,7 @@ class Oscilloscope:
                     if data is None:
                         continue
                     # Do the plotting
-                    plt.title(f"Trigger #{data.count} @ +{datetime.timedelta(seconds=data.time)}")
+                    plt.title(f"Trigger #{data.count} ({trg_info}) @ +{datetime.timedelta(seconds=data.time)}")
                     self._plot_h.set_ydata(data.data)
                     plt.draw()
                     plt.pause(self._interval)
