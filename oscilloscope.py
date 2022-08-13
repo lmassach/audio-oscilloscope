@@ -192,6 +192,8 @@ class Oscilloscope:
         proc_th.start()
         try:
             with stream, safe_open(self._out_fn, 'a') as out_f:
+                if out_f is not None:
+                    print("# trg_num time[s] mean[au] rms[au] max[au] min[au]", file=out_f)
                 while proc_th.is_alive() and plt.fignum_exists(self._fig_n):
                     # Get the latest trigger
                     data = None
@@ -201,7 +203,10 @@ class Oscilloscope:
                         for _ in range(n):
                             data = self._q_trg.get_nowait()
                             if out_f is not None:
-                                print(f"{data.count} {data.time}", file=out_f)
+                                print(
+                                    f"{data.count} {data.time} {data.data.mean()}"
+                                    f" {np.sqrt(data.data.dot(data.data)/data.data.size)}"
+                                    f" {data.data.max()} {data.data.min()}", file=out_f)
                     except queue.Empty:
                         pass
                     if data is not None:
@@ -231,7 +236,7 @@ if __name__ == "__main__":
                         help="Trigger level (default no trigger / auto mode).")
     parser.add_argument("-e", "--edge", choices=['r', 'f'], default='f',
                         help="Trigger edge: falling (default) or rising.")
-    parser.add_argument("-c", "--channel", type=lambda x: int(x) - 1, default=1,
+    parser.add_argument("-c", "--channel", type=lambda x: int(x) - 1, default=0,
                         help="Input channel number (default 1, the first).")
     parser.add_argument('-d', '--device', type=int_or_str,
                         help='Input device (number or substring), see -l.')
