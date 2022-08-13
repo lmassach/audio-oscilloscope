@@ -113,20 +113,26 @@ class Oscilloscope:
                         buf[trg_idx:trg_idx+self._window_len].copy()))
                     trg_idx += self._window_len
             else:
+                # Avoid triggering more than once every self._window_len
+                first = max(self._window_len // 2, trg_idx + self._window_len)
+                last = 3 * self._window_len // 2
+                if last <= first:
+                    continue
+                # Look for triggers
                 if self._edge:  # Falling edge
                     t = (buf[:-1] >= self._level) & (buf[1:] < self._level)
                 else:  # Rising edge
                     t = (buf[:-1] <= self._level) & (buf[1:] > self._level)
                 # Only consider triggers that have self._window_len//2 samples to
                 # their left and right, and have not been already processed
-                first = max(self._window_len // 2, trg_idx + 1)
-                last = 3 * self._window_len // 2
-                for i in np.argwhere(t[first:last]) + first:
-                    trg_idx = int(i)  # Avoid having 0D arrays
-                    self._trg_count += 1
-                    self._q_trg.put(TriggeredData(
-                        self._trg_count, (count - len(buf) + trg_idx) / self._rate,
-                        buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2].copy()))
+                try:
+                    trg_idx = int(np.argwhere(t[first:last])[0]) + first
+                except IndexError:
+                    continue  # No trigger
+                self._trg_count += 1
+                self._q_trg.put(TriggeredData(
+                    self._trg_count, (count - len(buf) + trg_idx) / self._rate,
+                    buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2].copy()))
 
     def run(self):
         """Run the oscilloscope. This will activate PyPlot's interactive.
@@ -160,7 +166,6 @@ class Oscilloscope:
         try:
             with stream:
                 while proc_th.is_alive() and plt.fignum_exists(self._fig_n):
-                    plt.pause(self._interval)
                     # Get the latest trigger
                     data = None
                     try:
@@ -176,6 +181,7 @@ class Oscilloscope:
                     plt.title(f"Trigger #{data.count} @ +{datetime.timedelta(seconds=data.time)}")
                     self._plot_h.set_ydata(data.data)
                     plt.draw()
+                    plt.pause(self._interval)
         finally:
             self._stop = True
             proc_th.join()
