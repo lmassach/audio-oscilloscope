@@ -193,6 +193,9 @@ class Oscilloscope:
         try:
             with stream, safe_open(self._out_fn, 'a') as out_f:
                 if out_f is not None:
+                    print(f"# {datetime.datetime.now().astimezone().isoformat()}", file=out_f)
+                    print(f"# {dev_info}", file=out_f)
+                    print(f"# {trg_info}", file=out_f)
                     print("# trg_num time[s] mean[au] rms[au] max[au] min[au]", file=out_f)
                 while proc_th.is_alive() and plt.fignum_exists(self._fig_n):
                     # Get the latest trigger
