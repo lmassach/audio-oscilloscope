@@ -110,7 +110,7 @@ class Oscilloscope:
                     self._trg_count += 1
                     self._q_trg.put(TriggeredData(
                         self._trg_count, (count - len(buf) + trg_idx) / self._rate,
-                        buf[trg_idx:trg_idx+self._window_len]))
+                        buf[trg_idx:trg_idx+self._window_len].copy()))
                     trg_idx += self._window_len
             else:
                 if self._edge:  # Falling edge
@@ -126,7 +126,7 @@ class Oscilloscope:
                     self._trg_count += 1
                     self._q_trg.put(TriggeredData(
                         self._trg_count, (count - len(buf) + trg_idx) / self._rate,
-                        buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2]))
+                        buf[trg_idx-self._window_len//2:trg_idx+self._window_len//2].copy()))
 
     def run(self):
         """Run the oscilloscope. This will activate PyPlot's interactive.
