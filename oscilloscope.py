@@ -30,6 +30,22 @@ class Reporter:
             print(*args, **kwargs)
 
 
+class NoneContext:
+    """A dummy context manager that just returns None."""
+    def __enter__(self):
+        pass
+
+    def __exit__(self, a, b, c):
+        pass
+
+
+def safe_open(fn, *args, **kwargs):
+    """Like open(), but returns a NoneContext if the filename is None."""
+    if fn is not None:
+        return open(fn, *args, **kwargs)
+    return NoneContext()
+
+
 # A class for keeping processed data
 TriggeredData = namedtuple("TriggeredData", "count time data")
 # count: the trigger number
@@ -41,7 +57,8 @@ class Oscilloscope:
     """A simple oscilloscope based on matplotlib and sounddevice."""
     def __init__(self, device=None, channel=0, window=0.01, interval=0.03,
                  sampling_rate=None, downsample=1, trigger_level=None,
-                 trigger_edge_falling=True, print_debug_info=False):
+                 trigger_edge_falling=True, output_file=None,
+                 print_debug_info=False):
         # Configuration input
         self._device_name = device
         self._channel = int(channel)
@@ -62,6 +79,7 @@ class Oscilloscope:
             raise ValueError("Trigger level must be in (-1, 1)")
         self._edge = bool(trigger_edge_falling)
         self._debug = bool(print_debug_info)
+        self._out_fn = output_file
 
         # Computed constants
         self._window_len = max(256, (int(self._window * self._rate) // 2) * 2)
@@ -173,7 +191,7 @@ class Oscilloscope:
         self._stop = False
         proc_th.start()
         try:
-            with stream:
+            with stream, safe_open(self._out_fn, 'a') as out_f:
                 while proc_th.is_alive() and plt.fignum_exists(self._fig_n):
                     # Get the latest trigger
                     data = None
@@ -181,9 +199,9 @@ class Oscilloscope:
                         # Limiting the number of calls to get_nowait avoids a deadlock
                         n = self._q_trg.qsize()
                         for _ in range(n):
-                            # TODO Fill an histogram of trigger times or Δt
-                            # TODO Add an option to save trigger data
                             data = self._q_trg.get_nowait()
+                            if out_f is not None:
+                                print(f"{data.count} {data.time}", file=out_f)
                     except queue.Empty:
                         pass
                     if data is not None:
@@ -225,6 +243,8 @@ if __name__ == "__main__":
                         help='Sampling rate of audio device in Hz.')
     parser.add_argument('-n', '--downsample', type=int, default=1, metavar='N',
                         help='Display every Nth sample (default: %(default)s).')
+    parser.add_argument('-o', '--output',
+                        help="Save trigger times to this output file.")
     parser.add_argument('--debug', action='store_true', help='Print debug messages.')
     args = parser.parse_args()
 
@@ -235,4 +255,4 @@ if __name__ == "__main__":
     Oscilloscope(
         args.device, args.channel, args.window / 1e3, args.interval / 1e3,
         args.samplerate, args.downsample, args.trigger, args.edge == 'f',
-        args.debug).run()
+        args.output, args.debug).run()
